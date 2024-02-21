@@ -18,7 +18,7 @@ using namespace std;
 #include <vector>
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues> 
-#include <unsupported/Eigen/FFT>
+//#include <unsupported/Eigen/FFT>
 using namespace Eigen;
 #include <algorithm>
 #include <fstream>
@@ -712,36 +712,73 @@ double x_ratio = 0.3;
 double EF_AlGaAs = 4.07 - 1.1*x_ratio; // [eV] (x<0.45) @ 300K !
 double BG_AlGaAs = 1.424 + 1.247*x_ratio; // [eV] (x<0.45)
 
+// P(In{1-x-y}Ga{x}Al{y}As)=P(InAs{1-x-y})+P(GaAs{x})+P(AlAs{y}) where P is any material parameter
+// using this for effective mass
+
 // Decleration: Material(EF, BG, e_eff_mass, lh_eff_mass, hh_eff_mass) @ 300K
 Material GaAs("GaAs", EF_GaAs, BG_GaAs, 0.063*mass_electron, 0.082*mass_electron, 0.51*mass_electron);
 Material AlGaAs("AlGaAs", EF_AlGaAs, BG_AlGaAs, (0.063+x_ratio*0.083)*mass_electron, (0.082+x_ratio*0.068)*mass_electron, (0.51+x_ratio*0.25)*mass_electron);
 Material Free_Space("Vacuum", 0.0, 0.0, mass_electron, mass_electron, mass_electron);
 Material GaInAs("GaInAs", 4.5, (0.36+0.63*x_ratio+0.43*x_ratio*x_ratio), 0.041*mass_electron, 0.052*mass_electron, 0.45*mass_electron);
 Material InP("InP", 4.38, 1.344, 0.08*mass_electron, 0.089*mass_electron, 0.6*mass_electron);
+Material AlGaInAs("Al_y Ga_x In_(1-x-y) As : y,x=0.24 (Ref: Mondry Babic) BG@1.4K", 0.0, 1.140, 0.24*mass_electron, 0.265*mass_electron, 1.69*mass_electron);
 
-void test(){
+void plot_potential(Heterostructure& QW){
+	double potential1[number_steps], potential2[number_steps];
+	double x_test[number_steps];
+	for(int i = 0; i<number_steps; i++){
+		x_test[i] = (QW.getThickness()/number_steps) + i*(QW.getThickness()/number_steps);
+		potential1[i] = relative_energy(QW.potential(2, x_test[i]), 2, QW);
+		potential2[i] = relative_energy(QW.potential(0, x_test[i]), 0, QW);
+	}
+    gnuplot_two_functions ("Potentials", "linespoints", "x [nm]", "Effective Potentials",
+			x_test, potential1, number_steps, "Conduction", x_test, potential2, number_steps, "Valence");
+}
+
+void script(){
 	//double length = 30.0;
 	GaAs.display();
-	Layer layer1(GaAs, 10); //2.5/8.0*length);
-	Layer layer2(AlGaAs, 10); //4.0/8.0*length);
+	//Layer layer2(GaAs, 10); // Material, latyer thickness [nm]
+	//Layer layer1(AlGaAs, 10); // Material, latyer thickness [nm]
+	Layer layer1(AlGaInAs, 10); // Material, latyer thickness [nm]
+	Layer layer2(InP, 10); // Material, latyer thickness [nm]
+	
 	layer1.display();
+	layer2.display();
 	
 	vector<Layer> layers;
 	layers = {layer2, layer1, layer2};
 	electric_field = 0;
 	
+	cout << "Set a linear value to iterate the electric field.\ndelta_field [V/nm] = ";
+	double delta_field;
+	cin >> delta_field;
+	
 	over_ride_offsets = true;
 	double E_gap_diff = fabs(-layer2.getMaterial().getBG() + layer1.getMaterial().getBG());
-	double conduction_band_offset_ratio = 0.6;
-	double valence_band_offset_ratio = 0.4;
+	double conduction_band_offset_ratio = 0.7;
+	double valence_band_offset_ratio = 0.3;
 	VBO_override = {-E_gap_diff*valence_band_offset_ratio, E_gap_diff*valence_band_offset_ratio};
 	CBO_override = {-E_gap_diff*conduction_band_offset_ratio, E_gap_diff*conduction_band_offset_ratio};
 	
 	Heterostructure QW(layers);
 	QW.display();
+	plot_potential(QW);
+	
+	//~ double potential1[number_steps], potential2[number_steps];
+	//~ double x_test[number_steps];
+	
+	//~ for(int i = 0; i<number_steps; i++){
+		//~ x_test[i] = i*(QW.getThickness()/number_steps);
+		//~ potential1[i] = QW.potential(2, x_test[i]);
+		//~ potential2[i] = QW.potential(0, x_test[i]);
+	//~ }
+	
+    //~ gnuplot_two_functions ("Potentials", "linespoints", "x [nm]", "Effective Potentials",
+			//~ x_test, potential1, number_steps, "Conduction", x_test, potential2, number_steps, "Valence");
 	
 	for(int i = 0; i < 11; i++) {
-		electric_field = i*0.005;
+		electric_field = i*delta_field;
 		cout << "E-Field = " << electric_field << endl;
 		cout << "Run " << i << endl;
 		
@@ -804,6 +841,6 @@ void test(){
 
 int main(int argc, char **argv)
 {
-	test();
+	script();
 	return 0;
 }
