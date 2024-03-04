@@ -52,7 +52,7 @@ std::vector<double> shiftEdgeToCenter(const std::vector<double>& input) {
 }
 
 vector<double> convolution(vector<double> function1, vector<double> function2){
-	cout << "in convolution\n";
+	//cout << "in convolution\n";
 	if((int)function1.size() != (int)function2.size()) throw std::runtime_error("ERROR @ convolution() :: sizes not equal, "+to_string((int)function1.size())+" and "+to_string((int)function2.size())+"\n");
 	const int N = (int)function1.size(); // Size of input signal -  assumes both vectors are same size
     double* input1 = (double*) fftw_malloc(sizeof(double) * N);
@@ -266,8 +266,8 @@ class Heterostructure {
 			vector<double> Gauss_y(number_steps), x_het(number_steps);
 			vector<vector<double>> Potential_y(3, vector<double>(number_steps));
 			double sum = 0, x_0 = this->getThickness()/2.0, sum_pot_init = 0;
-			double sigma = strength*this->heterostructure_thickness;
-			cout << "Creating Gaussian.\n";
+			double sigma = strength;//*this->heterostructure_thickness;
+			//cout << "Creating Gaussian.\n";
 			for(int p = 0; p < 3; p++){
 				for(int i = 0; i < number_steps; i++){
 					double delta_x = (this->getThickness()/(number_steps+1));
@@ -276,7 +276,7 @@ class Heterostructure {
 					Gauss_y[i] = 1.0/(sigma*sqrt(2*pi))*exp(-(x_het[i]-x_0)*(x_het[i]-x_0)/(2.0*sigma*sigma));
 				}
 			}
-			cout << "Done.\n";
+			//cout << "Done.\n";
 			
 			// Normalise Gaussian - so that potential is "CTS"
 			for(int i = 0; i < number_steps; i++){
@@ -288,26 +288,26 @@ class Heterostructure {
 				Gauss_y[i] = Gauss_y[i]/abs(sum);///sum;
 			}
 
-			cout << "Conv.\n";
+			//cout << "Conv.\n";
 			vector<vector<double>> Potential_QWI(3, vector<double>(number_steps));
 			
 			Potential_QWI[0] = convolution(Potential_y[0], Gauss_y);
 			Potential_QWI[1] = convolution(Potential_y[1], Gauss_y);
 			Potential_QWI[2] = convolution(Potential_y[2], Gauss_y);
 			
-			cout << "Conv returned.\n";
+			//cout << "Conv returned.\n";
 			Potential_QWI[0] = shiftEdgeToCenter(Potential_QWI[0]);
 			Potential_QWI[1] = shiftEdgeToCenter(Potential_QWI[1]);
 			Potential_QWI[2] = shiftEdgeToCenter(Potential_QWI[2]);
 			
 			// Print convolution result
 			double sum_pot_QWI = 0;
-			cout << "Conv returned.\n";
+			//cout << "Conv returned.\n";
 			for(int i = 0; i<number_steps; i++){
 				sum_pot_QWI += Potential_QWI[0][i];
 			}
-			cout << "Area before Intermixing > " << sum_pot_init << endl;
-			cout << "Area after Intermixing > " << sum_pot_QWI << endl;
+			//cout << "Area before Intermixing > " << sum_pot_init << endl;
+			//cout << "Area after Intermixing > " << sum_pot_QWI << endl;
 			for(int p = 0; p < 3; p++){
 				this->potential_[p] = Potential_QWI[p];
 			}		
@@ -448,7 +448,7 @@ void solve(Heterostructure& heterostructure, std::vector<double>& x_out,
 				eigenVectors[p][i][j] = eigenvectors(j, i);
 			}
 		}
-		cout << "test4 " << endl;
+		//cout << "test4 " << endl;
 	}
 }
 
@@ -546,7 +546,7 @@ double EF_GaAs = 4.07; // [eV] @ 300K !
 double EF_AlGaAs = 4.07 - 1.1*x_ratio; // [eV] (x<0.45) @ 300K !
 double BG_AlGaAs = 1.424 + 1.247*x_ratio; // [eV] (x<0.45)
 
-// Decleration: Material(EF, BG, e_eff_mass, lh_eff_mass, hh_eff_mass) @ 300K
+// Decleration: Material(name, EF, BG, e_eff_mass, lh_eff_mass, hh_eff_mass) @ 300K
 Material InAs("InAs", 4.9, 0.354, 0.023*mass_electron, 0.026*mass_electron, 0.41*mass_electron);
 Material GaInAs("GaInAs", 4.5, (0.36+0.63*x_ratio+0.43*x_ratio*x_ratio), 0.041*mass_electron, 0.052*mass_electron, 0.45*mass_electron);
 Material GaAs("GaAs", EF_GaAs, BG_GaAs, 0.063*mass_electron, 0.082*mass_electron, 0.51*mass_electron);
@@ -583,6 +583,63 @@ void plot_potential(Heterostructure& QW){
 			x_test, potential1, number_steps, "Conduction", x_test, potential2, number_steps, "Valence");
 }
 
+void ShiftBandgapQWI(Heterostructure& QW, double shift_amount){ // shift amount in nm ?
+	QW.resetPotential();
+	// solve QW with no Electric field
+	electric_field = 0.0;
+	vector<double> x(number_steps); //length element
+	vector<vector<double>> energies(3, vector<double>(number_steps)); //particle, energy_level
+	vector<vector<vector<double>>> eigenVectors(3, vector<vector<double>>(number_steps, vector<double>(number_steps)));
+	solve(QW, x, energies, eigenVectors);
+	
+	double initBG_valence;
+	if (relative_energy(energies[1][0],1,QW) < relative_energy(energies[2][0],2,QW)) initBG_valence = relative_energy(energies[2][0],2,QW);
+	else initBG_valence = relative_energy(energies[1][0],1,QW);
+	double initBG = h_c / abs(initBG_valence-relative_energy(energies[0][0],0,QW)); // [nm]
+	
+	// Bisection Method inspired routine
+	double prox = 1; // nm
+	double sigma = QW.getThickness()/6.0; // nm - max possible Intermixing
+	double sigma0 = 0;
+	double sigma_prev = sigma, temp;
+	double BG_valence;
+	int max_steps = 100;
+	int count = 0;
+	
+	cout << "Starting QWI routine."<<endl;
+	cout << "Initial Bandgap " << initBG << " [nm]" << endl;
+	for(int i = 0; i < max_steps; i++) {
+		QW.resetPotential();
+		QW.intermixPotential(sigma);
+		solve(QW, x, energies, eigenVectors);
+		
+		if (relative_energy(energies[1][0],1,QW) < relative_energy(energies[2][0],2,QW)) BG_valence = relative_energy(energies[2][0],2,QW);
+		else BG_valence = h_c / relative_energy(energies[1][0],1,QW);
+		double BG_diff = initBG - h_c / abs(BG_valence-relative_energy(energies[0][0],0,QW)); // [nm]
+		
+		temp = sigma;
+		if (BG_diff > shift_amount) {
+			sigma = (sigma0+sigma)/2.0;
+			sigma_prev = temp;
+			// don't change sigma0
+		} else if (BG_diff < shift_amount) { 
+			sigma0 = sigma;
+			sigma = (sigma_prev+sigma)/2.0;
+		}
+
+		cout << "Progress towards Bandgap " << BG_diff << " / " << shift_amount << endl;
+		if ((BG_diff < shift_amount+prox) && (BG_diff > shift_amount-prox)) {
+			cout << "New Bandgap " << h_c / abs(BG_valence-relative_energy(energies[0][0],0,QW)) << " [nm]"<<endl;
+			break;
+		}
+		
+		count++;
+	}
+	cout << "Found solution in " << count << " iterations."<<endl;
+}
+
+
+
 void script(){
 	//double length = 30.0;
 	AlGaInAs_two.display();
@@ -600,9 +657,6 @@ void script(){
 	double delta_field;
 	cin >> delta_field;
 	delta_field *= 0.0001; //conversion to V/Amstrong
-	cout << "Set an intermixing strength.\nsigma [A] = ";
-	double strength;
-	cin >> strength;
 	
 	over_ride_offsets = true;
 	double E_gap_diff = fabs(-layer2.getMaterial().getBG() + layer1.getMaterial().getBG());
@@ -614,8 +668,14 @@ void script(){
 	Heterostructure QW(layers);
 	QW.display();
 	plot_potential(QW);
-	QW.intermixPotential(strength);
+	
+	cout << "Set QWI target bandgap shift [nm] = ";
+	double shift;
+	cin >> shift;
+	ShiftBandgapQWI(QW, shift);
+	
 	plot_potential(QW);	
+	cout << " END END END ------------- "<<endl;
 	electric_field = 0.0;
 
 	for(int i = 0; i < 11; i++) {
@@ -646,9 +706,11 @@ void script(){
 		// sort results
 		vector<vector<double>> energies_relative(3, vector<double>(number_steps));
 		energies_relative = findEnergiesRelative(energies, QW);
-		// Absorption Routine (write to files)
+		// Absorption Routine (write to files for python)
 		cout << "Calculating overlaps.\n";
 		vector<vector<vector<double>>> I_squared_matrix = findOverlapsAll(eigenVectors);
+			// [electron state][hole state][hole type]
+		
 		cout << "Sorting transitions.\n";
 		vector<vector<vector<double>>> E_GAP = findTransitions(energies_relative); //Gap between [electron state] and [hole state] of [hole type]
 		cout << "Converting to wavelength.\n";
