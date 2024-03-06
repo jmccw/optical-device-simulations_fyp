@@ -36,20 +36,74 @@ double mass_electron = 1.0; //9.109534e-31; // 1.0 # [kg]
 double h_c = 1240; // eV nm
 double hbar_sqaured_2m = 3.81; // eV Amstrong squared
 
-const int number_steps = 512;
-const int max_matrix = 512;
+const int number_steps = 500;
+const int max_matrix = 500;
 const int ND = 2048;
 
-//Global Vectors - fast solving solution
-// Input (destroyed during calculation of eigenvalues and eigenvectors)
-//~ double trimatrix_diag [max_matrix];
-//~ double trimatrix_subdiag [max_matrix];
-//~ // Output
-//~ double trimatrix_eigenvalue [max_matrix];
-//~ double trimatrix_eigenvector [max_matrix][max_matrix];
-//~ // only used during calculation of eigenvalues and eigenvectors
-//~ double trimatrix_result[max_matrix][max_matrix];
-//~ double* pointer_matrix [max_matrix];
+std::vector<double> shiftEdgeToCenter(const std::vector<double>& input) {
+    std::vector<double> shiftedVector = input;
+    int halfSize = input.size() / 2;
+    
+    // Calculate the number of rotations needed to center the edge values
+    int rotations = halfSize % input.size();
+
+    // Perform cyclic rotations
+    std::rotate(shiftedVector.begin(), shiftedVector.begin() + rotations, shiftedVector.end());
+
+    return shiftedVector;
+}
+
+vector<double> convolution(vector<double> function1, vector<double> function2){
+	cout << "in convolution\n";
+	if((int)function1.size() != (int)function2.size()) throw std::runtime_error("ERROR @ convolution() :: sizes not equal, "+to_string((int)function1.size())+" and "+to_string((int)function2.size())+"\n");
+	const int N = (int)function1.size(); // Size of input signal -  assumes both vectors are same size
+    double* input1 = (double*) fftw_malloc(sizeof(double) * N);
+    double* input2 = (double*) fftw_malloc(sizeof(double) * N);
+    fftw_complex* output1 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
+    fftw_complex* output2 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
+
+    // Initialize input signal (e.g., with data from your computational physics project)
+    for (int i = 0; i < N; ++i) {
+        input1[i] = function1[i]; // Sample data
+        input2[i] = function2[i]; // Sample data
+    }
+
+    // Create FFTW plan for forward transform
+    fftw_plan plan1 = fftw_plan_dft_r2c_1d(N, input1, output1, FFTW_ESTIMATE);
+    fftw_plan plan2 = fftw_plan_dft_r2c_1d(N, input2, output2, FFTW_ESTIMATE);
+
+    // Execute forward transform
+    fftw_execute(plan1);
+    fftw_execute(plan2);
+    
+    fftw_complex* conv_mult = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
+    vector<double> result_vec(N);
+    for (int i = 0; i < N; ++i) { //BEWARE OF DIVISION BY N HERE !!! I dont fully understand why this has to happen, but it conserves "area"
+        conv_mult[i][0] = (output1[i][0] * output2[i][0] - output1[i][1] * output2[i][1])/N; // Real part
+        conv_mult[i][1] = (output1[i][0] * output2[i][1] + output1[i][1] * output2[i][0])/N; // Imaginary part 
+    }
+    
+    double* result = (double*) fftw_malloc(sizeof(double) * N);
+    fftw_plan plan3 = fftw_plan_dft_c2r_1d(N, conv_mult, result, FFTW_ESTIMATE);
+    fftw_execute(plan3);
+    
+    for (int i = 0; i < N; ++i) {
+        result_vec[i] = result[i]; 
+    }
+
+    // Cleanup resources
+    fftw_destroy_plan(plan1);
+    fftw_free(input1);
+    fftw_free(output1);
+    fftw_destroy_plan(plan2);
+    fftw_free(input2);
+    fftw_free(output2);
+    
+    fftw_free(result);
+    fftw_free(conv_mult);
+
+    return result_vec;
+}
 
 class Material {
 	private:
@@ -124,14 +178,27 @@ class Heterostructure {
 	private:
 		vector<Layer> layers;
 		double heterostructure_thickness;
+		vector<vector<double>> potential_;
+		
 	public:
 		// Constructor
-		Heterostructure(vector<Layer> layers_) : layers(layers_) {
+		Heterostructure(vector<Layer> layers_) : layers(layers_), potential_(3, vector<double>(number_steps)){
 			double total_thickness = 0;
 			for(Layer layer : layers) {
 				total_thickness += layer.getThickness();
 			}
 			this->heterostructure_thickness = total_thickness;
+			resetPotential();
+		}
+		
+		double getPotential(int particle, double x, int x_int) {
+			if (particle == 1 || particle == 2){ // if particle is hole
+				return this->potential_[particle][x_int] - electron_charge*electric_field*(x-this->getThickness()); // not as efficient as defining a strict function globally but gives ALOT of freedom (only adds +(number of layers)*3 computations at most  
+			}
+			else if (particle == 0){             // else it is electron
+				return this->potential_[particle][x_int] + electron_charge*electric_field*x;
+			}
+			return potential_[particle][x_int];
 		}
 		
 		vector<Layer> getLayers() const {
@@ -141,6 +208,17 @@ class Heterostructure {
 		// Getters / Setters
 		double getThickness() const {
 			return this->heterostructure_thickness;
+		}
+		
+		void resetPotential(){
+			double x_set[number_steps];
+			double delta_x = this->getThickness()/(number_steps+1);
+			for(int p = 0; p < 3; p++){
+				for(int i = 0; i < number_steps; i++){
+					x_set[i] = delta_x + i*delta_x;
+					this->potential_[p][i] = potential(p, x_set[i]);
+				}
+			}
 		}
 		
 		double eff_mass(int particle, double x) const { //
@@ -159,6 +237,7 @@ class Heterostructure {
 			double material_threshold = 0.0;
 			double U = 0.0, V = 0.0;
 			int i = 0;
+
 			for(Layer layer : this->layers) {
 				material_threshold += layer.getThickness();		//Material threshold determines whether or not we need to add a band offset to the potential at x
 				if(x >= material_threshold) {
@@ -173,15 +252,67 @@ class Heterostructure {
 				}
 				else { // x within new material threshold, return relevant potential - if used correctly, there should never be an error here (one might occur when an x input is out of analysis bounds)
 					if (particle == 1 || particle == 2){ // if particle is hole
-						return V - electron_charge*electric_field*(x-this->getThickness()); // not as efficient as defining a strict function globally but gives ALOT of freedom (only adds +(number of layers)*3 computations at most  
+						return V; // not as efficient as defining a strict function globally but gives ALOT of freedom (only adds +(number of layers)*3 computations at most  
 					}
 					else if (particle == 0){             // else it is electron
-						return U + electron_charge*electric_field*x;
+						return U;
 					}
 				}
 			}
+
 			throw std::runtime_error("Error: Unable to find valid potential for the given position."+to_string(x));
-			return 0.0; //this will never happen under normal circumstances
+			return 0.0; //this will never happen under normal circumstances but leaving this here to make compiler happy.
+		}
+		
+		void intermixPotential(double strength) {
+			vector<double> Gauss_y(number_steps), x_het(number_steps);
+			vector<vector<double>> Potential_y(3, vector<double>(number_steps));
+			double sum = 0, x_0 = this->getThickness()/2.0, sum_pot_init = 0;
+			double sigma = strength*this->heterostructure_thickness;
+			cout << "Creating Gaussian.\n";
+			for(int p = 0; p < 3; p++){
+				for(int i = 0; i < number_steps; i++){
+					double delta_x = (this->getThickness()/(number_steps+1));
+					x_het[i] = delta_x + i*delta_x;
+					Potential_y[p][i] = this->potential(p, x_het[i]);
+					Gauss_y[i] = 1.0/(sigma*sqrt(2*pi))*exp(-(x_het[i]-x_0)*(x_het[i]-x_0)/(2.0*sigma*sigma));
+				}
+			}
+			cout << "Done.\n";
+			
+			// Normalise Gaussian - so that potential is "CTS"
+			for(int i = 0; i < number_steps; i++){
+				sum += Gauss_y[i];
+				sum_pot_init += Potential_y[0][i];
+			}
+
+			for(int i = 0; i < number_steps; i++){
+				Gauss_y[i] = Gauss_y[i]/abs(sum);///sum;
+			}
+
+			cout << "Conv.\n";
+			vector<vector<double>> Potential_QWI(3, vector<double>(number_steps));
+			
+			Potential_QWI[0] = convolution(Potential_y[0], Gauss_y);
+			Potential_QWI[1] = convolution(Potential_y[1], Gauss_y);
+			Potential_QWI[2] = convolution(Potential_y[2], Gauss_y);
+			
+			cout << "Conv returned.\n";
+			Potential_QWI[0] = shiftEdgeToCenter(Potential_QWI[0]);
+			Potential_QWI[1] = shiftEdgeToCenter(Potential_QWI[1]);
+			Potential_QWI[2] = shiftEdgeToCenter(Potential_QWI[2]);
+			
+			// Print convolution result
+			double sum_pot_QWI = 0;
+			cout << "Conv returned.\n";
+			for(int i = 0; i<number_steps; i++){
+				sum_pot_QWI += Potential_QWI[0][i];
+			}
+			cout << "Area before Intermixing > " << sum_pot_init << endl;
+			cout << "Area after Intermixing > " << sum_pot_QWI << endl;
+			for(int p = 0; p < 3; p++){
+				this->potential_[p] = Potential_QWI[p];
+			}		
 		}
 		
 		void display() { // print heterostructure details
@@ -247,18 +378,18 @@ double relative_energy(double energy, int p, Heterostructure& QW) { // accept a 
 void solve(Heterostructure& heterostructure, std::vector<double>& x_out,
            std::vector<std::vector<double>>& energies,
            std::vector<std::vector<std::vector<double>>>& eigenVectors) {
-			    
+	cout << "not yet ";		    
 	double delta_x = heterostructure.getThickness() / (number_steps + 1.0); 
 	double x[number_steps];
-	
+	cout << "not yet ";
 	x[0] = delta_x; 
 	x_out[0] = x[0]; 
-	
+	cout << "not yet ";
 	for(int i = 1; i<number_steps; i++){ //initialise x (once)
 		x[i] = x[0] + i*delta_x;
 		x_out[i] = x[i];
 	}
-
+	cout << "not yet ";
 	//implementation of Kowano & Kito : 'Optical Waveguide Analysis' : solution of SE with effective mass approximation for all bands/particles
     for(int p = 0; p<=2; p++){ //for all particle types
 		//initialise solution matrix M
@@ -268,22 +399,22 @@ void solve(Heterostructure& heterostructure, std::vector<double>& x_out,
 				M[i][j] = 0;
 			}
 		}
-		
+		cout << "not yet ";
 		double alpha_w[number_steps], alpha_e[number_steps], alpha_x[number_steps];
 		alpha_w[0] = -hbar_sqaured_2m * 1.0/(delta_x*delta_x) * 2.0/(heterostructure.eff_mass(p,x[0])+heterostructure.eff_mass(p,x[0]));
         alpha_e[0] = -hbar_sqaured_2m * 1.0/(delta_x*delta_x) * 2.0/(heterostructure.eff_mass(p,x[0])+heterostructure.eff_mass(p,x[1]));
         alpha_x[0] = -alpha_w[0]-alpha_e[0];
         
-        M[0][0] = alpha_x[0] + heterostructure.potential(p,x[0]);
+        M[0][0] = alpha_x[0] + heterostructure.getPotential(p,x[0],0);
         M[0][1] = alpha_e[0];
-        
+        cout << "not yet ";
         for(int nr = 1; nr < number_steps-1; nr++){
             alpha_w[nr] = -hbar_sqaured_2m * 1.0/(delta_x*delta_x) * 2.0/(heterostructure.eff_mass(p,x[nr])+heterostructure.eff_mass(p,x[nr-1]));
             alpha_e[nr] = -hbar_sqaured_2m * 1.0/(delta_x*delta_x) * 2.0/(heterostructure.eff_mass(p,x[nr])+heterostructure.eff_mass(p,x[nr+1]));
             alpha_x[nr] = -alpha_w[nr]-alpha_e[nr];
 
             M[nr][nr-1] = alpha_w[nr];    //sub-diagonal
-            M[nr][nr] = alpha_x[nr] + heterostructure.potential(p,x[nr]); //diagonal
+            M[nr][nr] = alpha_x[nr] + heterostructure.getPotential(p,x[nr],nr); //diagonal
             M[nr][nr+1] = alpha_e[nr];   //upper diagonal   
 		}
 		cout << "test0 ";
@@ -291,7 +422,7 @@ void solve(Heterostructure& heterostructure, std::vector<double>& x_out,
         alpha_e[number_steps-1] = -hbar_sqaured_2m * 1.0/(delta_x*delta_x) * 2.0/(heterostructure.eff_mass(p,x[number_steps-1])+heterostructure.eff_mass(p,x[number_steps-1])); // assuming m(x_edge-dx) = m(x_edge) as boundary condition
         alpha_x[number_steps-1] = -alpha_w[number_steps-1]-alpha_e[number_steps-1];
         M[number_steps-1][number_steps-2] = alpha_w[number_steps-1];
-        M[number_steps-1][number_steps-1] = alpha_x[number_steps-1] + heterostructure.potential(p,x[number_steps-1]);
+        M[number_steps-1][number_steps-1] = alpha_x[number_steps-1] + heterostructure.getPotential(p,x[number_steps-1],number_steps-1);
 		
 		cout << "test0 ";
 		//solve Matrix (using Eigen)
@@ -315,9 +446,9 @@ void solve(Heterostructure& heterostructure, std::vector<double>& x_out,
 		
 		// Convert eigenvalues and eigenvectors to real-valued types
 		Eigen::VectorXd eigenvalues = solver.eigenvalues();
-		cout << "TEST4";
+		cout << "TEST4 ";
 		Eigen::MatrixXd eigenvectors = solver.eigenvectors();
-		cout << "TEST5";
+		cout << "TEST5 ";
 
 		// Print the eigenvalues
 		cout << "test3 ";
@@ -363,96 +494,6 @@ complex double convertToComplex(double num) {
 double cabs2 (double complex z)
 {
 	return creal(z) * creal(z) + cimag(z) * cimag(z);
-}
-
-vector<double> convolution(vector<double> function1, vector<double> function2){
-	cout << "in convolution\n";
-	if((int)function1.size() != (int)function2.size()) throw std::runtime_error("ERROR @ convolution() :: sizes not equal, "+to_string((int)function1.size())+" and "+to_string((int)function2.size())+"\n");	
-	//~ complex double func_1_complex [(int)function1.size()];
-	//~ complex double func_2_complex [(int)function2.size()];
-	//~ cout << "test\n";
-	
-	//~ //convert vectors to arrays to give to FFT implementation
-	//~ for(int i = 0; i < (int)function1.size(); i++){
-		//~ func_1_complex[i] = convertToComplex(function1[i]);
-		//~ func_2_complex[i] = convertToComplex(function2[i]);
-	//~ }
-	//~ cout << "test\n";
-	
-	//~ fast_fourier_transform(func_1_complex, (int)function1.size());
-	//~ cout << "fft1 done\n"; // HERE
-	//~ fast_fourier_transform(func_2_complex, (int)function2.size());
-	//~ cout << "fft2 done\n";
-	
-	//~ complex double temp [(int)function2.size()];
-	//~ cout << "tmultip[lying comps\n";
-	//~ for(int i = 0; i < (int)function1.size(); i++){
-		//~ temp[i] = function1[i]*function2[i];
-	//~ }
-	//~ cout << "done that\n";
-	
-	//~ inverse_fast_fourier_transform(temp, (int)function1.size());
-	//~ cout << "ifft done\n";
-	//~ //store result in vector to return
-	//~ vector<double> result;
-	//~ for (const auto& complex_num : temp) {
-		//~ //result.push_back(abs(creal(complex_num)));
-		//~ result.push_back(cabs(complex_num));
-	//~ }
-	//~ cout << "return\n";
-	//~ return result;
-	
-	const int N = (int)function1.size(); // Size of input signal -  assumes both vectors are same size
-    double* input1 = (double*) fftw_malloc(sizeof(double) * N);
-    double* input2 = (double*) fftw_malloc(sizeof(double) * N);
-    fftw_complex* output1 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
-    fftw_complex* output2 = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
-
-    // Initialize input signal (e.g., with data from your computational physics project)
-    for (int i = 0; i < N; ++i) {
-        input1[i] = function1[i]; // Sample data
-        input2[i] = function2[i]; // Sample data
-    }
-
-    // Create FFTW plan for forward transform
-    fftw_plan plan1 = fftw_plan_dft_r2c_1d(N, input1, output1, FFTW_ESTIMATE);
-    fftw_plan plan2 = fftw_plan_dft_r2c_1d(N, input2, output2, FFTW_ESTIMATE);
-
-    // Execute forward transform
-    fftw_execute(plan1);
-    fftw_execute(plan2);
-    
-    fftw_complex* conv_mult = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * N);
-    vector<double> result_vec(N);
-    for (int i = 0; i < N; ++i) {
-        conv_mult[i][0] = output1[i][0] * output2[i][0] - output1[i][1] * output2[i][1]; // Real part
-        conv_mult[i][1] = output1[i][0] * output2[i][1] + output1[i][1] * output2[i][0]; // Imaginary part 
-    }
-    
-    double* result = (double*) fftw_malloc(sizeof(double) * N);
-    fftw_plan plan3 = fftw_plan_dft_c2r_1d(N, conv_mult, result, FFTW_ESTIMATE);
-    fftw_execute(plan3);
-    
-    for (int i = 0; i < N; ++i) {
-        result_vec[i] = result[i]; 
-    }
-    
-
-    // Use the transformed data for further analysis or processing
-    // (e.g., spectral analysis, filtering, etc.)
-
-    // Cleanup resources
-    fftw_destroy_plan(plan1);
-    fftw_free(input1);
-    fftw_free(output1);
-    fftw_destroy_plan(plan2);
-    fftw_free(input2);
-    fftw_free(output2);
-    
-    fftw_free(result);
-    fftw_free(conv_mult);
-
-    return result_vec;
 }
 
 vector<vector<vector<double>>> findTransitions(vector<vector<double>> energies){
@@ -529,21 +570,6 @@ vector<double> pad_func_zeros(vector<double> func){
 	return func_padded;
 }
 
-
-std::vector<double> shiftEdgeToCenter(const std::vector<double>& input) {
-    std::vector<double> shiftedVector = input;
-    int halfSize = input.size() / 2;
-    
-    // Calculate the number of rotations needed to center the edge values
-    int rotations = halfSize % input.size();
-
-    // Perform cyclic rotations
-    std::rotate(shiftedVector.begin(), shiftedVector.begin() + rotations, shiftedVector.end());
-
-    return shiftedVector;
-}
-
-
 vector<vector<vector<double>>> wavelengthTransformation(vector<vector<vector<double>>> data_in) {
 	//The intention here is that the user passes in E_GAP to find an adjacent matrix in wavelength terms.
 	vector<vector<vector<double>>> data_out(number_steps, vector<vector<double>>(number_steps, vector<double>(2)));
@@ -594,8 +620,8 @@ void plot_potential(Heterostructure& QW){
 	double x_test[number_steps];
 	for(int i = 0; i<number_steps; i++){
 		x_test[i] = (QW.getThickness()/(number_steps+1)) + i*(QW.getThickness()/(number_steps+1));
-		potential1[i] = relative_energy(QW.potential(2, x_test[i]), 2, QW);
-		potential2[i] = relative_energy(QW.potential(0, x_test[i]), 0, QW);
+		potential1[i] = relative_energy(QW.getPotential(2, x_test[i],i), 2, QW);
+		potential2[i] = relative_energy(QW.getPotential(0, x_test[i],i), 0, QW);
 	}
     gnuplot_two_functions ("Potentials", "linespoints", "x [nm]", "Effective Potentials",
 			x_test, potential1, number_steps, "Conduction", x_test, potential2, number_steps, "Valence");
@@ -614,10 +640,13 @@ void script(){
 	layers = {layer1, layer2, layer1};
 	electric_field = 0;
 	
-	//~ cout << "Set a linear value to iterate the electric field.\ndelta_field [V/um] = ";
-	//~ double delta_field;
-	//~ cin >> delta_field;
-	//~ delta_field *= 0.0001; //conversion to V/Amstrong
+	cout << "Set a linear value to iterate the electric field.\ndelta_field [V/um] = ";
+	double delta_field;
+	cin >> delta_field;
+	delta_field *= 0.0001; //conversion to V/Amstrong
+	cout << "Set an intermixing strength.\nsigma [A] = ";
+	double strength;
+	cin >> strength;
 	
 	over_ride_offsets = true;
 	double E_gap_diff = fabs(-layer2.getMaterial().getBG() + layer1.getMaterial().getBG());
@@ -629,148 +658,102 @@ void script(){
 	Heterostructure QW(layers);
 	QW.display();
 	plot_potential(QW);
+	QW.intermixPotential(strength);
+	plot_potential(QW);	
+	electric_field = 0.0;
 	
-	vector<double> Gauss_y(number_steps), x_het(number_steps);
-	vector<vector<double>> Potential_y(3, vector<double>(number_steps));
-	double sum = 0, x_0 = QW.getThickness()/2.0, sum_pot_init = 0;
-	double sigma = 5;
-	cout << "Creating Gaussian.\n";
-	for(int p = 0; p < 3; p++){
-		for(int i = 0; i < number_steps; i++){
-			x_het[i] = (QW.getThickness()/(number_steps+1)) + i*(QW.getThickness()/(number_steps+1));
-			Potential_y[p][i] = QW.potential(p, x_het[i]);
-			Gauss_y[i] = 1.0/sqrt(sqrt(2*pi)*sigma)*exp(-(x_het[i]-x_0)*(x_het[i]-x_0)/(2.0*sigma*sigma));
-			//sum += Gauss_y[i];
-			//sum_pot_init += 
+	vector
+
+	for(int i = 0; i < 11; i++) {
+		electric_field = i*delta_field;
+		cout << "E-Field = " << electric_field << endl;
+		cout << "Run " << i << endl;
+		
+		vector<vector<vector<double>>> RESULT; //ISSUE HERE
+		
+		//cout << "test ";
+		
+		// solve QW with Electric field
+		vector<double> x(number_steps); //length element
+		vector<vector<double>> energies(3, vector<double>(number_steps)); //particle, energy_level
+		vector<vector<vector<double>>> eigenVectors(3, vector<vector<double>>(number_steps, vector<double>(number_steps)));
+		cout << "test1 ";
+		solve(QW, x, energies, eigenVectors);
+		if (i==0){
+			//PLOTTING FINAL
+			//plot_potential(QW);
+			double x_array_2[number_steps], y_array_2[number_steps], y_array_1[number_steps];
+			for (int i = 0; i < number_steps; i++) {
+				y_array_2[i] = eigenVectors[0][0][i];
+				y_array_1[i] = eigenVectors[0][5][i];
+				x_array_2[i] = x[i];
+			}
+			gnuplot_two_functions ("Numerical Eigenfunctions", "linespoints", "x", "Eigenfunction |E_1> (x)",
+				x_array_2, y_array_2, number_steps, "Ground", x_array_2, y_array_1, number_steps, "5th excited state");
+
+		}
+
+		//plot_potential(QW);
+		// sort results
+		vector<vector<double>> energies_relative(3, vector<double>(number_steps));
+		energies_relative = findEnergiesRelative(energies, QW);
+		// Absorption Routine
+		cout << "Calculating overlaps.\n";
+		vector<vector<vector<double>>> I_squared_matrix = findOverlapsAll(eigenVectors);
+		cout << "Sorting transitions.\n";
+		vector<vector<vector<double>>> E_GAP = findTransitions(energies_relative); //Gap between [electron state] and [hole state] of [hole type]
+		cout << "Converting to wavelength.\n";
+		vector<vector<vector<double>>> E_GAP_WL = wavelengthTransformation(E_GAP);
+		
+		// Write I_squared_matrix to a file
+		ofstream I_squared_file("I_squared_matrix_"+to_string(i)+".txt");
+		if(I_squared_file.is_open()){
+			for(const auto& row : I_squared_matrix){
+				for(const auto& col : row){
+					for(double val : col){
+						I_squared_file << val << " ";
+					}
+					I_squared_file << "\n";
+				}
+				I_squared_file << "\n";
+			}
+			I_squared_file.close();
+		}
+		else{
+			cerr << "Unable to open I_squared_matrix file for writing.\n";
+		}
+
+		// Write E_GAP_WL to a file
+		ofstream E_GAP_WL_file("E_GAP_WL_"+to_string(i)+".txt");
+		if(E_GAP_WL_file.is_open()){
+			for(const auto& row : E_GAP_WL){
+				for(const auto& col : row){
+					for(double val : col){
+						E_GAP_WL_file << val << " ";
+					}
+					E_GAP_WL_file << "\n";
+				}
+				E_GAP_WL_file << "\n";
+			}
+			E_GAP_WL_file.close();
+		}
+		else{
+			cerr << "Unable to open E_GAP_WL file for writing.\n";
+		}
+		
+		if (i==10){
+			//PLOTTING FINAL
+			plot_potential(QW);
+			double x_array_2[number_steps], y_array_2[number_steps], y_array_1[number_steps];
+			for (int i = 0; i < number_steps; i++) {
+				y_array_2[i] = eigenVectors[0][0][i];
+				y_array_1[i] = eigenVectors[0][5][i];
+				x_array_2[i] = x[i];
+			}
+			gnuplot_two_functions ("Numerical Eigenfunctions", "linespoints", "x", "Eigenfunction |E_1> (x)",
+				x_array_2, y_array_2, number_steps, "Ground", x_array_2, y_array_1, number_steps, "5th excited state");
 		}
 	}
-	cout << "Done.\n";
-	
-	// Normalise Gaussian - so that potential is "CTS"
-	for(int i = 0; i < number_steps; i++){
-		sum += Gauss_y[i];
-		sum_pot_init += Potential_y[0][i];
-	}
-	for(int i = 0; i < number_steps; i++){
-		Gauss_y[i] /= sum;
-	}
-
-	cout << "Conv.\n";
-	vector<vector<double>> Potential_QWI(3, vector<double>(number_steps));
-	//vector<double> Gauss_y_new = pad_func_zeros(Gauss_y);
-	//vector<double> Potential_y_new = pad_func_zeros(Potential_y[0]);
-	
-	Potential_QWI[0] = convolution(Gauss_y, Potential_y[0]);
-	cout << "Conv returned.\n";
-	Potential_QWI[0] = shiftEdgeToCenter(Potential_QWI[0]);
-	// Print convolution result
-	double potential1[number_steps];//, potential2[number_steps*2];
-	double x_test[number_steps];
-	double sum_pot_QWI = 0;
-	cout << "Conv returned.\n";
-	for(int i = 0; i<number_steps; i++){
-		x_test[i] = i;
-		potential1[i] = Potential_QWI[0][i];
-		sum_pot_QWI += potential1[i];
-	}
-	cout << "Area before Intermixing > " << sum_pot_init << endl;
-	cout << "Area after Intermixing > " << sum_pot_QWI << endl;
-	
-    gnuplot_two_functions ("Potentials", "linespoints", "x [nm]", "Effective Potentials",
-			x_test, potential1, number_steps, "Conduction", x_test, potential1, number_steps, "Valence");
-
-	
-		
-	//~ for(int i = 0; i < 11; i++) {
-		//~ electric_field = i*delta_field;
-		//~ cout << "E-Field = " << electric_field << endl;
-		//~ cout << "Run " << i << endl;
-		
-		//~ vector<vector<vector<double>>> RESULT; //ISSUE HERE
-		
-		//~ //cout << "test ";
-		
-		//~ // solve QW with Electric field
-		//~ vector<double> x(number_steps); //length element
-		//~ vector<vector<double>> energies(3, vector<double>(number_steps)); //particle, energy_level
-		//~ vector<vector<vector<double>>> eigenVectors(3, vector<vector<double>>(number_steps, vector<double>(number_steps)));
-		//~ cout << "test1 ";
-		//~ solve(QW, x, energies, eigenVectors);
-		//~ if (i==0){
-			//~ //PLOTTING FINAL
-			//~ //plot_potential(QW);
-			//~ double x_array_2[number_steps], y_array_2[number_steps], y_array_1[number_steps];
-			//~ for (int i = 0; i < number_steps; i++) {
-				//~ y_array_2[i] = eigenVectors[0][0][i];
-				//~ y_array_1[i] = eigenVectors[0][5][i];
-				//~ x_array_2[i] = x[i];
-			//~ }
-			//~ gnuplot_two_functions ("Numerical Eigenfunctions", "linespoints", "x", "Eigenfunction |E_1> (x)",
-				//~ x_array_2, y_array_2, number_steps, "Ground", x_array_2, y_array_1, number_steps, "5th excited state");
-
-		//~ }
-
-		//~ //plot_potential(QW);
-		//~ // sort results
-		//~ vector<vector<double>> energies_relative(3, vector<double>(number_steps));
-		//~ energies_relative = findEnergiesRelative(energies, QW);
-		//~ // Absorption Routine
-		//~ cout << "Calculating overlaps.\n";
-		//~ vector<vector<vector<double>>> I_squared_matrix = findOverlapsAll(eigenVectors);
-		//~ cout << "Sorting transitions.\n";
-		//~ vector<vector<vector<double>>> E_GAP = findTransitions(energies_relative); //Gap between [electron state] and [hole state] of [hole type]
-		//~ cout << "Converting to wavelength.\n";
-		//~ vector<vector<vector<double>>> E_GAP_WL = wavelengthTransformation(E_GAP);
-		
-		//~ // Write I_squared_matrix to a file
-		//~ ofstream I_squared_file("I_squared_matrix_"+to_string(i)+".txt");
-		//~ if(I_squared_file.is_open()){
-			//~ for(const auto& row : I_squared_matrix){
-				//~ for(const auto& col : row){
-					//~ for(double val : col){
-						//~ I_squared_file << val << " ";
-					//~ }
-					//~ I_squared_file << "\n";
-				//~ }
-				//~ I_squared_file << "\n";
-			//~ }
-			//~ I_squared_file.close();
-		//~ }
-		//~ else{
-			//~ cerr << "Unable to open I_squared_matrix file for writing.\n";
-		//~ }
-
-		//~ // Write E_GAP_WL to a file
-		//~ ofstream E_GAP_WL_file("E_GAP_WL_"+to_string(i)+".txt");
-		//~ if(E_GAP_WL_file.is_open()){
-			//~ for(const auto& row : E_GAP_WL){
-				//~ for(const auto& col : row){
-					//~ for(double val : col){
-						//~ E_GAP_WL_file << val << " ";
-					//~ }
-					//~ E_GAP_WL_file << "\n";
-				//~ }
-				//~ E_GAP_WL_file << "\n";
-			//~ }
-			//~ E_GAP_WL_file.close();
-		//~ }
-		//~ else{
-			//~ cerr << "Unable to open E_GAP_WL file for writing.\n";
-		//~ }
-		//~ if (i==10){
-			//~ //PLOTTING FINAL
-			//~ plot_potential(QW);
-			//~ double x_array_2[number_steps], y_array_2[number_steps], y_array_1[number_steps];
-			//~ for (int i = 0; i < number_steps; i++) {
-				//~ y_array_2[i] = eigenVectors[0][0][i];
-				//~ y_array_1[i] = eigenVectors[0][5][i];
-				//~ x_array_2[i] = x[i];
-			//~ }
-			//~ gnuplot_two_functions ("Numerical Eigenfunctions", "linespoints", "x", "Eigenfunction |E_1> (x)",
-				//~ x_array_2, y_array_2, number_steps, "Ground", x_array_2, y_array_1, number_steps, "5th excited state");
-
-		//~ }
-	//~ }
 }
 
 int main(int argc, char **argv)
